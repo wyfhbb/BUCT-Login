@@ -1,0 +1,54 @@
+# 编译输出
+/campus-login
+/campus-login.exe
+/build/
+*.exe
+*.so
+*.dylib
+
+# 测试输出
+*.test
+*.out
+
+# Go工作区文件
+go.work
+
+# 日志文件
+*.log
+log.txt
+
+# 临时文件
+*.tmp
+*.temp
+
+# IDE文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 操作系统生成的文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 环境配置文件
+.env
+.env.local
+.env.*.local
+
+# 个人配置
+config.yaml
+config.json
+
+# js
+js_scripts/
+
+# Python
+*.ipynb
+*.py
