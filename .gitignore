@@ -52,3 +52,7 @@ js_scripts/
 # Python
 *.ipynb
 *.py
+
+# build artifacts
+bin/
+build.sh
