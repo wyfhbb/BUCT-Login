@@ -42,6 +42,9 @@ Thumbs.db
 .env.local
 .env.*.local
 
+# direnv / nix
+.direnv/
+
 # 个人配置
 config.yaml
 config.json
