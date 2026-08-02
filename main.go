@@ -1,82 +1,17 @@
 package main
 
 import (
-	"buct-login/utils"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/sirupsen/logrus"
 )
 
-// Config represents the configuration structure
-type Config struct {
-	Username        string `json:"username"`
-	Password        string `json:"password"`
-	Action          string `json:"action"`
-	MonitorInterval int    `json:"monitor_interval"` // seconds
-	RetryInterval   int    `json:"retry_interval"`   // seconds
-	LogFile         string `json:"log_file"`
-	Quiet           bool   `json:"quiet"`
-	NoLog           bool   `json:"no_log"`
-}
-
-// DefaultConfig returns default configuration
-func DefaultConfig() *Config {
-	return &Config{
-		Action:          "login",
-		MonitorInterval: 60, // 1 minute
-		RetryInterval:   5,  // 5 seconds
-		LogFile:         "buct-login.log",
-		Quiet:           false,
-		NoLog:           false,
-	}
-}
-
-// LoadConfig loads configuration from file
-func LoadConfig(configPath string) (*Config, error) {
-	config := DefaultConfig()
-
-	if configPath == "" {
-		return config, nil
-	}
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %v", err)
-	}
-
-	err = json.Unmarshal(data, config)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %v", err)
-	}
-
-	return config, nil
-}
-
-// SaveConfig saves configuration to file
-func SaveConfig(config *Config, configPath string) error {
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %v", err)
-	}
-
-	dir := filepath.Dir(configPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %v", err)
-	}
-
-	err = os.WriteFile(configPath, data, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write config file: %v", err)
-	}
-
-	return nil
-}
+// version is set at build time with -ldflags "-X main.version=..."
+var version = "dev"
 
 // CustomFormatter defines a Python-like log format
 type CustomFormatter struct{}
@@ -137,274 +72,11 @@ func initLogger(logFile string, quiet bool) error {
 
 		multiWriter := io.MultiWriter(os.Stdout, file)
 		logrus.SetOutput(multiWriter)
-
-		fmt.Printf("Log will be saved to: %s\n", logFile)
 	} else {
 		logrus.SetOutput(os.Stdout)
 	}
 
 	return nil
-}
-
-// formatBytes converts bytes to human readable format
-func formatBytes(bytes float64) string {
-	if bytes >= 1024*1024*1024 {
-		return fmt.Sprintf("%.2fGB", bytes/(1024*1024*1024))
-	} else if bytes >= 1024*1024 {
-		return fmt.Sprintf("%.2fMB", bytes/(1024*1024))
-	} else if bytes >= 1024 {
-		return fmt.Sprintf("%.2fKB", bytes/1024)
-	}
-	return fmt.Sprintf("%.0fb", bytes)
-}
-
-// handleLogin performs login operation with detailed logging
-func handleLogin(username, password string) error {
-	logrus.Info("Starting login process")
-
-	if username == "" || password == "" {
-		logrus.Error("Username and password cannot be empty")
-		return fmt.Errorf("username and password cannot be empty")
-	}
-
-	logrus.Debug("Getting current status")
-	ip, loginStatus, err := utils.GetStatus()
-	if err != nil {
-		logrus.Errorf("Failed to get status: %v", err)
-		return err
-	}
-
-	logrus.Debugf("Current status retrieved - IP: %s, LoginStatus: %v", ip, loginStatus)
-
-	if loginStatus {
-		logrus.Info("Already logged in")
-		// Get detailed info for logged in user
-		info, err := utils.GetUserInfo()
-		if err == nil {
-			logUserInfo(info)
-		}
-		return nil
-	}
-
-	logrus.Infof("Attempting login with IP: %s", ip)
-	res, err := utils.Login(username, password, "20", ip)
-	if err != nil {
-		logrus.Errorf("Login request failed: %v", err)
-		return err
-	}
-
-	logrus.Debugf("Login response received: %v", res)
-
-	if resStatus, ok := res["res"]; ok && resStatus == "ok" {
-		logrus.Info("Login successful")
-		// Log detailed info after successful login
-		time.Sleep(1 * time.Second) // Wait a moment for status to update
-		info, err := utils.GetUserInfo()
-		if err == nil {
-			logUserInfo(info)
-		}
-	} else if ecode, ok := res["ecode"]; ok && ecode == "E2901" {
-		logrus.Error("Login failed: invalid username or password")
-		return fmt.Errorf("login failed: invalid username or password")
-	} else if errorMsg, ok := res["error"]; ok {
-		logrus.Errorf("Login error: %v", errorMsg)
-		return fmt.Errorf("login error: %v", errorMsg)
-	} else {
-		logrus.Errorf("Unknown login error: %v", res)
-		return fmt.Errorf("unknown login error: %v", res)
-	}
-
-	return nil
-}
-
-// logUserInfo logs detailed user information
-func logUserInfo(info map[string]interface{}) {
-	if userName, ok := info["user_name"]; ok {
-		logrus.Infof("Current account: %v", userName)
-	}
-
-	if addTime, ok := info["add_time"].(float64); ok {
-		loginTime := time.Unix(int64(addTime), 0)
-		logrus.Infof("Login time: %s", loginTime.Format("2006-01-02 15:04:05"))
-	}
-
-	if allBytes, ok := info["all_bytes"].(float64); ok {
-		logrus.Infof("Traffic used this session: %s", formatBytes(allBytes))
-	}
-
-	if onlineIP, ok := info["online_ip"]; ok {
-		logrus.Infof("Online IP: %v", onlineIP)
-	}
-
-	if userMac, ok := info["user_mac"]; ok {
-		logrus.Infof("MAC address: %v", userMac)
-	}
-
-	if sumBytes, ok := info["sum_bytes"].(float64); ok {
-		logrus.Infof("Total traffic used: %s", formatBytes(sumBytes))
-	}
-
-	if sumSeconds, ok := info["sum_seconds"].(float64); ok {
-		duration := time.Duration(sumSeconds) * time.Second
-		logrus.Infof("Total online time: %s", duration.String())
-	}
-
-	if userBalance, ok := info["user_balance"].(float64); ok {
-		logrus.Infof("Account balance: %.2f yuan", userBalance)
-	}
-
-	if userCharge, ok := info["user_charge"].(float64); ok {
-		logrus.Infof("Monthly charges: %.2f yuan", userCharge)
-	}
-}
-
-// handleLookup displays current user information
-func handleLookup() (string, error) {
-	logrus.Info("Getting user information")
-
-	info, err := utils.GetUserInfo()
-	if err != nil {
-		logrus.Errorf("Failed to get user information: %v", err)
-		return "error", err
-	}
-
-	if errorMsg, exists := info["error"]; exists {
-		if errorMsg == "not_online_error" {
-			logrus.Info("Not logged in")
-			return "not_login", nil
-		} else if errorMsg != "ok" {
-			logrus.Errorf("Error getting user info: %v", errorMsg)
-			return "error", nil
-		}
-	}
-
-	// Display user information
-	if userName, ok := info["user_name"]; ok {
-		fmt.Printf("Current account: %s\n", userName)
-	}
-
-	if addTime, ok := info["add_time"].(float64); ok {
-		loginTime := time.Unix(int64(addTime), 0)
-		fmt.Printf("Login time: %s\n", loginTime.Format("2006-01-02 15:04:05"))
-	}
-
-	if allBytes, ok := info["all_bytes"].(float64); ok {
-		fmt.Printf("Session traffic: %s\n", formatBytes(allBytes))
-	}
-
-	if onlineIP, ok := info["online_ip"]; ok {
-		fmt.Printf("Online IP: %s\n", onlineIP)
-	}
-
-	if userMac, ok := info["user_mac"]; ok {
-		fmt.Printf("MAC address: %s\n", userMac)
-	}
-
-	if sumBytes, ok := info["sum_bytes"].(float64); ok {
-		fmt.Printf("Total traffic: %s\n", formatBytes(sumBytes))
-	}
-
-	if sumSeconds, ok := info["sum_seconds"].(float64); ok {
-		duration := time.Duration(sumSeconds) * time.Second
-		fmt.Printf("Total time: %s\n", duration.String())
-	}
-
-	if userBalance, ok := info["user_balance"].(float64); ok {
-		fmt.Printf("Balance: %.2f yuan\n", userBalance)
-	}
-
-	if userCharge, ok := info["user_charge"].(float64); ok {
-		fmt.Printf("Monthly charges: %.2f yuan\n", userCharge)
-	}
-
-	logUserInfo(info)
-	return "already_login", nil
-}
-
-// handleLogout performs logout operation
-func handleLogout() error {
-	logrus.Info("Starting logout process")
-
-	ip, loginStatus, err := utils.GetStatus()
-	if err != nil {
-		logrus.Errorf("Failed to get status: %v", err)
-		return err
-	}
-
-	if ip == "" {
-		logrus.Error("Cannot get IP address")
-		return fmt.Errorf("cannot get IP address")
-	}
-
-	if !loginStatus {
-		logrus.Info("Not logged in")
-		return nil
-	}
-
-	logrus.Infof("Local IP address: %s", ip)
-	logrus.Info("Attempting logout")
-
-	ret, err := utils.Logout(ip, "20")
-	if err != nil {
-		logrus.Errorf("Logout request failed: %v", err)
-		return err
-	}
-
-	logrus.Debugf("Logout response received: %v", ret)
-
-	if errorMsg, ok := ret["error"]; ok {
-		if errorMsg == "ok" {
-			logrus.Info("Logout successful")
-		} else {
-			logrus.Errorf("Logout error: %v", errorMsg)
-			return fmt.Errorf("logout error: %v", errorMsg)
-		}
-	} else {
-		logrus.Errorf("Unknown logout response: %v", ret)
-		return fmt.Errorf("unknown logout response: %v", ret)
-	}
-
-	return nil
-}
-
-// handleMonitor monitors login status with configurable intervals
-func handleMonitor(username, password string, monitorInterval, retryInterval int) error {
-	logrus.Infof("Starting monitor mode - MonitorInterval: %ds, RetryInterval: %ds", monitorInterval, retryInterval)
-
-	for {
-		status, err := handleLookup()
-		if err != nil {
-			logrus.Errorf("Failed to check status: %v", err)
-			logrus.Infof("Retrying in %d seconds", retryInterval)
-			time.Sleep(time.Duration(retryInterval) * time.Second)
-			continue
-		}
-
-		if status == "not_login" {
-			logrus.Info("Detected offline status, attempting auto-login")
-			err := handleLogin(username, password)
-			if err != nil {
-				logrus.Errorf("Auto-login failed: %v", err)
-				logrus.Infof("Retrying in %d seconds", retryInterval)
-				time.Sleep(time.Duration(retryInterval) * time.Second)
-				continue
-			}
-		} else {
-			logrus.Info("Currently online")
-		}
-
-		logrus.Infof("Next check in %d seconds", monitorInterval)
-		time.Sleep(time.Duration(monitorInterval) * time.Second)
-	}
-}
-
-// generateConfigTemplate generates a template configuration file
-func generateConfigTemplate(configPath string) error {
-	config := DefaultConfig()
-	config.Username = "your_student_id"
-	config.Password = "your_password"
-
-	return SaveConfig(config, configPath)
 }
 
 // showUsage displays usage information in Chinese
@@ -415,57 +87,95 @@ func showUsage() {
 	fmt.Println("  buct-login -action=login -username=学号 -password=密码")
 	fmt.Println("  buct-login -action=info")
 	fmt.Println("  buct-login -action=logout")
-	fmt.Println("  buct-login -action=monitor -username=学号 -password=密码")
+	fmt.Println("  buct-login -action=install-service -username=学号 -password=密码 -check-interval=60")
+	fmt.Println("  buct-login -action=service-status")
+	fmt.Println("  buct-login -action=uninstall-service")
 	fmt.Println("  buct-login -config=config.json")
 	fmt.Println("  buct-login -generate-config=config.json")
 	fmt.Println("")
+	fmt.Println("操作 (-action):")
+	fmt.Println("  login              登录（已在线则跳过；开启账号检测时账号不匹配会先登出再登录）")
+	fmt.Println("  info               查看当前登录信息")
+	fmt.Println("  logout             登出")
+	fmt.Println("  install-service    安装 systemd 定时服务（周期性检查并自动登录，开机自动生效）")
+	fmt.Println("  uninstall-service  卸载 systemd 定时服务")
+	fmt.Println("  service-status     查看 systemd 定时服务状态")
+	fmt.Println("")
 	fmt.Println("参数:")
-	fmt.Println("  -action            操作类型: login|info|logout|monitor")
-	fmt.Println("  -username          用户名 (login和monitor模式必需)")
-	fmt.Println("  -password          密码 (login和monitor模式必需)")
-	fmt.Println("  -config            配置文件路径")
+	fmt.Println("  -username          用户名 (login 和 install-service 必需)")
+	fmt.Println("  -password          密码 (login 和 install-service 必需)")
+	fmt.Println("  -config            配置文件路径 (默认自动查找 ./config.json、~/.config/buct-login/config.json、/etc/buct-login/config.json)")
 	fmt.Println("  -generate-config   生成配置文件模板")
-	fmt.Println("  -monitor-interval  监控间隔(秒) (默认: 60)")
-	fmt.Println("  -retry-interval    重试间隔(秒) (默认: 5)")
+	fmt.Println("  -check-interval    systemd 检查间隔(秒) (默认: 60)")
+	fmt.Println("  -retry-interval    单次运行内的重试间隔(秒) (默认: 5)")
+	fmt.Println("  -max-retries       单次运行的最大尝试次数 (默认: 3)")
+	fmt.Println("  -check-account     账号不匹配检测，开启后若在线账号与配置不符则登出重登 (默认: true)")
+	fmt.Println("  -user              安装/卸载/查看用户级 systemd 服务 (默认为系统级，需要 sudo)")
 	fmt.Println("  -logfile           日志文件路径 (默认: buct-login.log)")
 	fmt.Println("  -nolog             不保存日志文件，只输出到控制台")
 	fmt.Println("  -quiet             静默模式，减少日志输出")
+	fmt.Println("  -version           显示版本号")
 	fmt.Println("")
 	fmt.Println("配置文件示例:")
 	fmt.Println(`  {
     "username": "your_student_id",
     "password": "your_password",
-    "action": "monitor",
-    "monitor_interval": 60,
+    "action": "login",
+    "check_interval": 60,
     "retry_interval": 5,
-    "log_file": "logs/buct-login.log",
+    "max_retries": 3,
+    "check_account": true,
+    "log_file": "/var/log/buct-login.log",
     "quiet": false,
     "no_log": false
   }`)
 	fmt.Println("")
 	fmt.Println("示例:")
 	fmt.Println("  buct-login -action=login -username=yourschoolID -password=yourpassword")
-	fmt.Println("  buct-login -action=monitor -username=yourschoolID -password=yourpassword -monitor-interval=30")
-	fmt.Println("  buct-login -config=config.json")
-	fmt.Println("  buct-login -generate-config=config.json")
-	fmt.Println("  buct-login -action=info -logfile=./logs/network.log")
+	fmt.Println("  sudo buct-login -action=install-service -username=yourschoolID -password=yourpassword -check-interval=120")
+	fmt.Println("  buct-login -action=install-service -user -config=config.json")
+	fmt.Println("  buct-login -action=install-service -username=yourschoolID -password=yourpassword -check-account=false")
+	fmt.Println("  sudo journalctl -u buct-login.service -f    # 查看自动登录日志")
+}
+
+// isServiceAction reports whether the action manages systemd instead of the network
+func isServiceAction(action string) bool {
+	switch action {
+	case "install-service", "uninstall-service", "service-status":
+		return true
+	}
+	return false
 }
 
 func main() {
 	var (
-		action          = flag.String("action", "", "Action type: login|info|logout|monitor")
-		username        = flag.String("username", "", "Username")
-		password        = flag.String("password", "", "Password")
-		configPath      = flag.String("config", "", "Configuration file path")
-		generateConfig  = flag.String("generate-config", "", "Generate configuration template")
-		monitorInterval = flag.Int("monitor-interval", 60, "Monitor interval in seconds")
-		retryInterval   = flag.Int("retry-interval", 5, "Retry interval in seconds")
-		logFile         = flag.String("logfile", "buct-login.log", "Log file path")
-		noLog           = flag.Bool("nolog", false, "Don't save log file")
-		quiet           = flag.Bool("quiet", false, "Quiet mode")
+		action         = flag.String("action", "", "Action: login|info|logout|install-service|uninstall-service|service-status")
+		username       = flag.String("username", "", "Username")
+		password       = flag.String("password", "", "Password")
+		configPath     = flag.String("config", "", "Configuration file path")
+		generateConfig = flag.String("generate-config", "", "Generate configuration template")
+		checkInterval  = flag.Int("check-interval", 60, "systemd check interval in seconds")
+		retryInterval  = flag.Int("retry-interval", 5, "Retry interval in seconds")
+		maxRetries     = flag.Int("max-retries", 3, "Max attempts per run")
+		checkAccount   = flag.Bool("check-account", true, "Logout and re-login when another account is online")
+		userScope      = flag.Bool("user", false, "Use the user systemd instance instead of the system one")
+		logFile        = flag.String("logfile", "buct-login.log", "Log file path")
+		noLog          = flag.Bool("nolog", false, "Don't save log file")
+		quiet          = flag.Bool("quiet", false, "Quiet mode")
+		showVersion    = flag.Bool("version", false, "Print version and exit")
 	)
 
+	flag.Usage = showUsage
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("buct-login %s\n", version)
+		os.Exit(0)
+	}
+
+	// Only the flags present on the command line may override the config file
+	passed := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { passed[f.Name] = true })
 
 	// Generate config template if requested
 	if *generateConfig != "" {
@@ -478,42 +188,44 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Load configuration
-	config, err := LoadConfig(*configPath)
+	// Fall back to the well known config locations when none is given
+	resolvedConfig := *configPath
+	if resolvedConfig == "" {
+		resolvedConfig = FindConfig()
+	}
+
+	config, err := LoadConfig(resolvedConfig)
 	if err != nil {
 		fmt.Printf("Failed to load config: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Override config with command line arguments
-	if *action != "" {
-		config.Action = *action
+	overrides := map[string]func(){
+		"action":         func() { config.Action = *action },
+		"username":       func() { config.Username = *username },
+		"password":       func() { config.Password = *password },
+		"check-interval": func() { config.CheckInterval = *checkInterval },
+		"retry-interval": func() { config.RetryInterval = *retryInterval },
+		"max-retries":    func() { config.MaxRetries = *maxRetries },
+		"check-account":  func() { config.CheckAccount = *checkAccount },
+		"logfile":        func() { config.LogFile = *logFile },
+		"nolog":          func() { config.NoLog = *noLog },
+		"quiet":          func() { config.Quiet = *quiet },
 	}
-	if *username != "" {
-		config.Username = *username
-	}
-	if *password != "" {
-		config.Password = *password
-	}
-	if *monitorInterval != 60 {
-		config.MonitorInterval = *monitorInterval
-	}
-	if *retryInterval != 5 {
-		config.RetryInterval = *retryInterval
-	}
-	if *logFile != "buct-login.log" {
-		config.LogFile = *logFile
-	}
-	if *noLog {
-		config.NoLog = *noLog
-	}
-	if *quiet {
-		config.Quiet = *quiet
+	for name, apply := range overrides {
+		if passed[name] {
+			apply()
+		}
 	}
 
-	// Initialize logger
+	if config.Action == "" {
+		showUsage()
+		os.Exit(1)
+	}
+
+	// Initialize logger, service management only ever writes to the terminal
 	var logPath string
-	if !config.NoLog {
+	if !config.NoLog && !isServiceAction(config.Action) {
 		logPath = config.LogFile
 	}
 
@@ -523,24 +235,29 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Log configuration
-	logrus.Debugf("Configuration loaded - Action: %s, MonitorInterval: %ds, RetryInterval: %ds, LogFile: %s, Quiet: %v",
-		config.Action, config.MonitorInterval, config.RetryInterval, config.LogFile, config.Quiet)
-
-	if config.Action == "" {
-		showUsage()
-		os.Exit(1)
-	}
+	logrus.Debugf("Configuration loaded - Action: %s, ConfigFile: %s, CheckInterval: %ds, RetryInterval: %ds, MaxRetries: %d, CheckAccount: %v, LogFile: %s, Quiet: %v",
+		config.Action, resolvedConfig, config.CheckInterval, config.RetryInterval,
+		config.MaxRetries, config.CheckAccount, config.LogFile, config.Quiet)
 
 	switch config.Action {
 	case "login":
-		err = handleLogin(config.Username, config.Password)
+		err = handleLogin(config)
 	case "info":
-		_, err = handleLookup()
+		err = handleInfo()
 	case "logout":
 		err = handleLogout()
+	case "install-service":
+		// Only an explicit -config pins the unit to that file, a config picked up
+		// from the search paths is copied to the standard location of the scope
+		err = installService(config, *userScope, *configPath)
+	case "uninstall-service":
+		err = uninstallService(*userScope, *configPath)
+	case "service-status":
+		err = serviceStatus(*userScope)
 	case "monitor":
-		err = handleMonitor(config.Username, config.Password, config.MonitorInterval, config.RetryInterval)
+		fmt.Println("monitor 模式已移除，请改用 systemd 定时服务:")
+		fmt.Println("  sudo buct-login -action=install-service -username=学号 -password=密码 -check-interval=60")
+		os.Exit(1)
 	default:
 		fmt.Printf("Unknown action: %s\n", config.Action)
 		showUsage()
