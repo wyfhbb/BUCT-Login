@@ -21,6 +21,7 @@ type systemdEnv struct {
 	UnitDir    string
 	ConfigPath string
 	LogPath    string
+	StatePath  string
 	BinaryPath string
 }
 
@@ -36,15 +37,17 @@ func newSystemdEnv(userScope bool, configPath string) (*systemdEnv, error) {
 		env.UnitDir = filepath.Join(dir, "systemd", "user")
 		env.ConfigPath = filepath.Join(dir, "buct-login", "config.json")
 
-		home, err := os.UserHomeDir()
+		stateDir, err := userStateDir()
 		if err != nil {
-			return nil, fmt.Errorf("cannot locate home directory: %v", err)
+			return nil, fmt.Errorf("cannot locate state directory: %v", err)
 		}
-		env.LogPath = filepath.Join(home, ".local", "state", "buct-login", "buct-login.log")
+		env.LogPath = filepath.Join(stateDir, "buct-login", "buct-login.log")
+		env.StatePath = filepath.Join(stateDir, "buct-login", "state.json")
 	} else {
 		env.UnitDir = "/etc/systemd/system"
 		env.ConfigPath = "/etc/buct-login/config.json"
 		env.LogPath = "/var/log/buct-login.log"
+		env.StatePath = "/var/lib/buct-login/state.json"
 	}
 
 	if configPath != "" {
@@ -87,8 +90,9 @@ func quoteUnitArg(value string) string {
 func (e *systemdEnv) renderService(config *Config) string {
 	var b strings.Builder
 
-	// Give one run enough time to exhaust its retries before systemd kills it
-	timeout := config.RetryInterval*config.MaxRetries + 60
+	// Give one run enough time to walk the probe pool and then exhaust its
+	// retries before systemd kills it
+	timeout := config.RetryInterval*effectiveAttempts(config) + runProbeBudget(config) + 60
 
 	b.WriteString("[Unit]\n")
 	b.WriteString("Description=BUCT campus network login\n")
@@ -196,7 +200,30 @@ func installService(config *Config, userScope bool, configPath string) error {
 			config.RetryInterval, config.MaxRetries)
 	}
 
-	if worst := config.RetryInterval * config.MaxRetries; worst >= config.CheckInterval {
+	if config.ProbeEnabled {
+		if config.ProbeTimeout < 1 {
+			return fmt.Errorf("探测超时必须大于 0 (当前: %ds)", config.ProbeTimeout)
+		}
+		if config.ProbeFailThreshold < 1 {
+			return fmt.Errorf("探测失败阈值必须大于 0 (当前: %d)", config.ProbeFailThreshold)
+		}
+		for _, target := range probeURLs(config) {
+			if !strings.HasPrefix(target, "http://") && !strings.HasPrefix(target, "https://") {
+				return fmt.Errorf("网站池地址必须以 http:// 或 https:// 开头: %s", target)
+			}
+		}
+	}
+
+	if config.AccountCheckInterval < 0 {
+		return fmt.Errorf("账号核对间隔不能为负数 (当前: %ds)", config.AccountCheckInterval)
+	}
+
+	if attempts := effectiveAttempts(config); attempts < config.MaxRetries {
+		fmt.Printf("提示: max-retries=%d 配合 %ds 的重试间隔会让单次运行超过 %ds，实际只会尝试 %d 次\n",
+			config.MaxRetries, config.RetryInterval, maxRunSeconds, attempts)
+	}
+
+	if worst := config.RetryInterval*effectiveAttempts(config) + runProbeBudget(config); worst >= config.CheckInterval {
 		fmt.Printf("提示: 单次运行最长约 %ds，超过了 %ds 的检查间隔，下一次检查会顺延\n",
 			worst, config.CheckInterval)
 	}
@@ -209,6 +236,12 @@ func installService(config *Config, userScope bool, configPath string) error {
 	// it to a location that exists for the chosen scope
 	if !serviceConfig.NoLog && !filepath.IsAbs(serviceConfig.LogFile) {
 		serviceConfig.LogFile = env.LogPath
+	}
+
+	// The state file is written by every run, so it has to be pinned the same
+	// way: the working directory of the unit is not a place to keep it
+	if !filepath.IsAbs(serviceConfig.StateFile) {
+		serviceConfig.StateFile = env.StatePath
 	}
 
 	if err := SaveConfig(&serviceConfig, env.ConfigPath); err != nil {
@@ -241,8 +274,28 @@ func installService(config *Config, userScope bool, configPath string) error {
 	fmt.Println("")
 	fmt.Printf("安装完成: 每 %d 秒检查一次，单次最多尝试 %d 次，重试间隔 %d 秒\n",
 		serviceConfig.CheckInterval, serviceConfig.MaxRetries, serviceConfig.RetryInterval)
+
+	if serviceConfig.ProbeEnabled {
+		pool := probeURLs(&serviceConfig)
+		fmt.Printf("网站池探测: 已开启，共 %d 个站点轮询，连续 %d 个无响应才去查门户\n",
+			len(pool), serviceConfig.ProbeFailThreshold)
+		for i, target := range pool {
+			fmt.Printf("  %d. %s\n", i+1, target)
+		}
+		fmt.Printf("状态文件: %s\n", serviceConfig.StateFile)
+	} else {
+		fmt.Println("网站池探测: 已关闭 (每次检查都会直接访问校园网门户)")
+	}
+
 	if serviceConfig.CheckAccount {
 		fmt.Println("账号不匹配检测: 已开启 (发现其他账号在线会先登出再登录)")
+		if serviceConfig.ProbeEnabled {
+			if serviceConfig.AccountCheckInterval > 0 {
+				fmt.Printf("  网络正常时每 %d 秒查一次门户核对账号\n", serviceConfig.AccountCheckInterval)
+			} else {
+				fmt.Println("  网络正常时不核对账号 (account_check_interval = 0)")
+			}
+		}
 	} else {
 		fmt.Println("账号不匹配检测: 已关闭")
 	}

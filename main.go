@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 )
@@ -116,6 +117,14 @@ func showUsage() {
 	fmt.Println("  -quiet             静默模式，减少日志输出")
 	fmt.Println("  -version           显示版本号")
 	fmt.Println("")
+	fmt.Println("网站池探测 (减少对校园网门户的访问):")
+	fmt.Println("  -probe                    先探测网站池，探测失败才去查门户 (默认: true)")
+	fmt.Println("  -probe-urls               网站池，逗号分隔 (默认为内置的 5 个国内 204 探测端点)")
+	fmt.Println("  -probe-timeout            单次探测超时(秒) (默认: 5)")
+	fmt.Println("  -probe-attempts           连续多少个站点无响应才判定断网 (默认: 3)")
+	fmt.Println("  -account-check-interval   网络正常时查一次门户核对账号的间隔(秒)，0 为关闭 (默认: 1800)")
+	fmt.Println("  -statefile                状态文件路径，记录轮询位置与上次账号核对时间")
+	fmt.Println("")
 	fmt.Println("配置文件示例:")
 	fmt.Println(`  {
     "username": "your_student_id",
@@ -125,6 +134,18 @@ func showUsage() {
     "retry_interval": 5,
     "max_retries": 3,
     "check_account": true,
+    "probe_enabled": true,
+    "probe_urls": [
+      "http://connect.rom.miui.com/generate_204",
+      "http://connectivitycheck.platform.hicloud.com/generate_204",
+      "http://wifi.vivo.com.cn/generate_204",
+      "http://www.qualcomm.cn/generate_204",
+      "http://204.ustclug.org/"
+    ],
+    "probe_timeout": 5,
+    "probe_fail_threshold": 3,
+    "account_check_interval": 1800,
+    "state_file": "/var/lib/buct-login/state.json",
     "log_file": "/var/log/buct-login.log",
     "quiet": false,
     "no_log": false
@@ -135,7 +156,20 @@ func showUsage() {
 	fmt.Println("  sudo buct-login -action=install-service -username=yourschoolID -password=yourpassword -check-interval=120")
 	fmt.Println("  buct-login -action=install-service -user -config=config.json")
 	fmt.Println("  buct-login -action=install-service -username=yourschoolID -password=yourpassword -check-account=false")
+	fmt.Println("  buct-login -action=login -probe-urls=http://connect.rom.miui.com/generate_204,https://www.baidu.com")
+	fmt.Println("  buct-login -action=login -probe=false    # 关闭网站池，每次都直接查门户")
 	fmt.Println("  sudo journalctl -u buct-login.service -f    # 查看自动登录日志")
+}
+
+// splitList turns a comma separated flag value into a clean list
+func splitList(value string) []string {
+	var list []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			list = append(list, item)
+		}
+	}
+	return list
 }
 
 // isServiceAction reports whether the action manages systemd instead of the network
@@ -158,6 +192,12 @@ func main() {
 		retryInterval  = flag.Int("retry-interval", 5, "Retry interval in seconds")
 		maxRetries     = flag.Int("max-retries", 3, "Max attempts per run")
 		checkAccount   = flag.Bool("check-account", true, "Logout and re-login when another account is online")
+		probe          = flag.Bool("probe", true, "Probe the site pool first and only ask the portal when it fails")
+		probePool      = flag.String("probe-urls", "", "Site pool, comma separated")
+		probeTimeout   = flag.Int("probe-timeout", 5, "Timeout of one probe in seconds")
+		probeAttempts  = flag.Int("probe-attempts", 3, "Silent targets in a row before the portal is asked")
+		accountCheck   = flag.Int("account-check-interval", 1800, "Seconds between two periodic account checks, 0 disables them")
+		stateFile      = flag.String("statefile", "", "State file path (probe rotation and account check clock)")
 		userScope      = flag.Bool("user", false, "Use the user systemd instance instead of the system one")
 		logFile        = flag.String("logfile", "buct-login.log", "Log file path")
 		noLog          = flag.Bool("nolog", false, "Don't save log file")
@@ -201,16 +241,22 @@ func main() {
 	}
 
 	overrides := map[string]func(){
-		"action":         func() { config.Action = *action },
-		"username":       func() { config.Username = *username },
-		"password":       func() { config.Password = *password },
-		"check-interval": func() { config.CheckInterval = *checkInterval },
-		"retry-interval": func() { config.RetryInterval = *retryInterval },
-		"max-retries":    func() { config.MaxRetries = *maxRetries },
-		"check-account":  func() { config.CheckAccount = *checkAccount },
-		"logfile":        func() { config.LogFile = *logFile },
-		"nolog":          func() { config.NoLog = *noLog },
-		"quiet":          func() { config.Quiet = *quiet },
+		"action":                 func() { config.Action = *action },
+		"username":               func() { config.Username = *username },
+		"password":               func() { config.Password = *password },
+		"check-interval":         func() { config.CheckInterval = *checkInterval },
+		"retry-interval":         func() { config.RetryInterval = *retryInterval },
+		"max-retries":            func() { config.MaxRetries = *maxRetries },
+		"check-account":          func() { config.CheckAccount = *checkAccount },
+		"probe":                  func() { config.ProbeEnabled = *probe },
+		"probe-urls":             func() { config.ProbeURLs = splitList(*probePool) },
+		"probe-timeout":          func() { config.ProbeTimeout = *probeTimeout },
+		"probe-attempts":         func() { config.ProbeFailThreshold = *probeAttempts },
+		"account-check-interval": func() { config.AccountCheckInterval = *accountCheck },
+		"statefile":              func() { config.StateFile = *stateFile },
+		"logfile":                func() { config.LogFile = *logFile },
+		"nolog":                  func() { config.NoLog = *noLog },
+		"quiet":                  func() { config.Quiet = *quiet },
 	}
 	for name, apply := range overrides {
 		if passed[name] {
@@ -238,6 +284,9 @@ func main() {
 	logrus.Debugf("Configuration loaded - Action: %s, ConfigFile: %s, CheckInterval: %ds, RetryInterval: %ds, MaxRetries: %d, CheckAccount: %v, LogFile: %s, Quiet: %v",
 		config.Action, resolvedConfig, config.CheckInterval, config.RetryInterval,
 		config.MaxRetries, config.CheckAccount, config.LogFile, config.Quiet)
+	logrus.Debugf("Probe settings - Enabled: %v, Targets: %v, Timeout: %ds, FailThreshold: %d, AccountCheckInterval: %ds, StateFile: %s",
+		config.ProbeEnabled, probeURLs(config), config.ProbeTimeout, config.ProbeFailThreshold,
+		config.AccountCheckInterval, resolveStatePath(config))
 
 	switch config.Action {
 	case "login":

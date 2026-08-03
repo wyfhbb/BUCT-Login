@@ -139,8 +139,14 @@ func performLogout() error {
 }
 
 // ensureOnline makes one attempt at bringing the device online with the
-// configured account, logging out first when another account holds the session
-func ensureOnline(config *Config) error {
+// configured account, logging out first when another account holds the session.
+//
+// loginWhenOffline tells whether a portal reporting no session should lead to a
+// login. The probe path wants that; the slow lane does not, because it only
+// runs when the public internet is reachable, and then a portal with no session
+// means this machine is simply not behind the portal (tethering, home network),
+// where a login attempt would only fail.
+func ensureOnline(config *Config, loginWhenOffline bool) error {
 	info, online, err := queryStatus()
 	if err != nil {
 		return err
@@ -175,6 +181,10 @@ func ensureOnline(config *Config) error {
 		time.Sleep(2 * time.Second)
 	} else {
 		logrus.Info("Not logged in")
+		if !loginWhenOffline {
+			logrus.Info("The public network is reachable, this machine is not behind the portal, skipping login")
+			return nil
+		}
 	}
 
 	if err := performLogin(config.Username, config.Password); err != nil {
@@ -190,16 +200,51 @@ func ensureOnline(config *Config) error {
 	return nil
 }
 
-// handleLogin brings the device online, retrying transient failures. It is the
-// entry point used by the systemd service, so a run is expected to be short
-// lived and to report failure through its exit code.
-func handleLogin(config *Config) error {
+// maxRunSeconds bounds the worst case duration of a single run. Runs are
+// started by a timer or by cron and are expected to be over long before the
+// next one begins, so a config asking for more retries than fit in that budget
+// gets trimmed rather than left to overrun.
+const maxRunSeconds = 300
+
+// portalAttemptSeconds is what the portal round trips of one attempt can cost
+// before its retry interval even starts
+const portalAttemptSeconds = 20
+
+// effectiveAttempts returns how many attempts of this config fit in the run
+// budget. install-service warns about an oversized retry setting, but a
+// hand-edited config file or a cron entry never passes through it, so the
+// limit has to hold at run time too.
+func effectiveAttempts(config *Config) int {
 	attempts := config.MaxRetries
 	if attempts < 1 {
-		attempts = 1
+		return 1
 	}
 
-	logrus.Info("Starting login process")
+	perAttempt := config.RetryInterval + portalAttemptSeconds
+	if perAttempt < 1 {
+		perAttempt = 1
+	}
+
+	allowed := (maxRunSeconds - runProbeBudget(config)) / perAttempt
+	if allowed < 1 {
+		allowed = 1
+	}
+
+	if attempts > allowed {
+		return allowed
+	}
+	return attempts
+}
+
+// retryEnsureOnline runs ensureOnline until it succeeds or the attempts of this
+// run are used up. Wrong credentials end it immediately, retrying them would
+// only lock the account out faster.
+func retryEnsureOnline(config *Config, loginWhenOffline bool) error {
+	attempts := effectiveAttempts(config)
+	if attempts < config.MaxRetries {
+		logrus.Warnf("max_retries %d with a %ds retry interval would let one run last past %ds, using %d attempts instead",
+			config.MaxRetries, config.RetryInterval, maxRunSeconds, attempts)
+	}
 
 	var lastErr error
 	for attempt := 1; attempt <= attempts; attempt++ {
@@ -207,7 +252,7 @@ func handleLogin(config *Config) error {
 			logrus.Infof("Attempt %d/%d", attempt, attempts)
 		}
 
-		err := ensureOnline(config)
+		err := ensureOnline(config, loginWhenOffline)
 		if err == nil {
 			return nil
 		}
@@ -226,6 +271,92 @@ func handleLogin(config *Config) error {
 	}
 
 	return lastErr
+}
+
+// accountCheckDue reports whether the periodic account check is due.
+//
+// The probe pool can tell that the network works, never which account made it
+// work, so a session opened with the wrong account would keep the internet
+// running and never be noticed. Asking the portal on a long interval catches
+// that without turning every run into a portal request.
+func accountCheckDue(config *Config, state *State) bool {
+	if !config.CheckAccount {
+		return false
+	}
+
+	if config.Username == "" {
+		logrus.Debug("No username configured, skipping the account check")
+		return false
+	}
+
+	if config.AccountCheckInterval <= 0 {
+		logrus.Debug("Periodic account check disabled")
+		return false
+	}
+
+	elapsed := time.Now().Unix() - state.LastAccountCheck
+	// A state file from the future (clock jump, restored backup) must not park
+	// the check forever
+	if elapsed < 0 {
+		return true
+	}
+
+	if remaining := int64(config.AccountCheckInterval) - elapsed; remaining > 0 {
+		logrus.Infof("Public network is fine, next account check in %ds", remaining)
+		return false
+	}
+
+	return true
+}
+
+// handleLogin is the entry point used by the systemd timer and by cron, so a
+// run is expected to be short lived and to report failure through its exit code.
+//
+// With the probe pool enabled a run asks the portal in only two cases: the
+// public internet did not answer, or the periodic account check came due. That
+// keeps a machine that is online and correct from touching the portal at all,
+// which is the whole point of the pool.
+func handleLogin(config *Config) error {
+	statePath := resolveStatePath(config)
+
+	release, acquired := acquireRunLock(statePath)
+	if !acquired {
+		logrus.Info("A previous run is still in progress, skipping this one")
+		return nil
+	}
+	defer release()
+
+	if !config.ProbeEnabled {
+		logrus.Info("Starting login process")
+		return retryEnsureOnline(config, true)
+	}
+
+	// Registered after the lock, so the state is written while it is still held
+	state := LoadState(statePath)
+	defer SaveState(statePath, state)
+
+	blocked, reason := runProbes(config, state)
+
+	if blocked {
+		logrus.Infof("Public network unreachable (%s), asking the portal", reason)
+		err := retryEnsureOnline(config, true)
+		if err == nil {
+			// The portal was just asked, so the slow lane clock restarts here
+			state.LastAccountCheck = time.Now().Unix()
+		}
+		return err
+	}
+
+	if !accountCheckDue(config, state) {
+		return nil
+	}
+
+	logrus.Info("Public network is fine, running the periodic account check")
+	err := retryEnsureOnline(config, false)
+	if err == nil {
+		state.LastAccountCheck = time.Now().Unix()
+	}
+	return err
 }
 
 // handleLogout performs logout operation

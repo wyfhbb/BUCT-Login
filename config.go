@@ -16,9 +16,24 @@ type Config struct {
 	RetryInterval int    `json:"retry_interval"` // seconds between attempts of one run
 	MaxRetries    int    `json:"max_retries"`    // max attempts per run, including the first one
 	CheckAccount  bool   `json:"check_account"`  // logout and re-login when the online account differs
-	LogFile       string `json:"log_file"`
-	Quiet         bool   `json:"quiet"`
-	NoLog         bool   `json:"no_log"`
+
+	// Probe pool: instead of asking the portal on every run, a run first checks
+	// whether the public internet answers, and only turns to the portal when it
+	// does not. See probe.go for how the pool is walked.
+	ProbeEnabled       bool     `json:"probe_enabled"`
+	ProbeURLs          []string `json:"probe_urls"`
+	ProbeTimeout       int      `json:"probe_timeout"`        // seconds per probe
+	ProbeFailThreshold int      `json:"probe_fail_threshold"` // silent targets in a row before the portal is asked
+
+	// AccountCheckInterval is the slow lane that catches a session held by
+	// another account: the probe cannot see which account is online, so the
+	// portal is asked about it at most this often. 0 disables it.
+	AccountCheckInterval int `json:"account_check_interval"` // seconds
+
+	StateFile string `json:"state_file"`
+	LogFile   string `json:"log_file"`
+	Quiet     bool   `json:"quiet"`
+	NoLog     bool   `json:"no_log"`
 }
 
 // DefaultConfig returns default configuration
@@ -29,9 +44,17 @@ func DefaultConfig() *Config {
 		RetryInterval: 5,  // 5 seconds
 		MaxRetries:    3,
 		CheckAccount:  true,
-		LogFile:       "buct-login.log",
-		Quiet:         false,
-		NoLog:         false,
+
+		ProbeEnabled:       true,
+		ProbeURLs:          append([]string(nil), defaultProbeURLs...),
+		ProbeTimeout:       5,
+		ProbeFailThreshold: 3,
+
+		AccountCheckInterval: 1800, // 30 minutes
+
+		LogFile: "buct-login.log",
+		Quiet:   false,
+		NoLog:   false,
 	}
 }
 
