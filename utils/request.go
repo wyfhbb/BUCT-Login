@@ -230,7 +230,7 @@ func GetUserInfo() (map[string]interface{}, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return map[string]interface{}{"error": "timeout"}, nil
+		return map[string]interface{}{"error": err.Error()}, nil
 	}
 	defer resp.Body.Close()
 
